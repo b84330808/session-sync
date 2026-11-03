@@ -39,6 +39,8 @@ Claude desktop keeps a separate sidebar list for each account. Switch accounts a
 
 Requirements: Windows 10 or 11. The .NET Framework 4.8 it uses is built into Windows.
 
+The exe is not code-signed, so Windows SmartScreen may warn the first time you run it ("Windows protected your PC"). Click **More info → Run anyway**, or build it yourself from the source.
+
 After changing the list of the **signed-in** account, restart Claude to see the change in its sidebar. Before removing or overwriting cards of the signed-in account, close Claude, or it may write them back.
 
 ## What it touches
