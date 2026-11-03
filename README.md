@@ -1,4 +1,6 @@
-# Session Sync for Claude Desktop
+# Session Sync
+
+> Unofficial. Not affiliated with or endorsed by Anthropic.
 
 **English** · [繁體中文](README.zh-TW.md) · [日本語](README.ja.md)
 

@@ -1,4 +1,6 @@
-# Session 同步器（Claude 桌面版）
+# Session 同步器
+
+> 非官方工具，與 Anthropic 無關，也未經其認可。
 
 [English](README.md) · **繁體中文** · [日本語](README.ja.md)
 

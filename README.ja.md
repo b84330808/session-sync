@@ -1,4 +1,6 @@
-# Session 同期ツール（Claude デスクトップ用）
+# Session 同期ツール
+
+> 非公式ツールです。Anthropic とは関係がなく、承認も受けていません。
 
 [English](README.md) · [繁體中文](README.zh-TW.md) · **日本語**
 
