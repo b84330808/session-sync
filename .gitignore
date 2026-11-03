@@ -1,0 +1,4 @@
+# Build output (publish SessionSync.exe through Releases instead)
+*.exe
+*.pdb
+*.sstmp*
