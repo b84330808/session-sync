@@ -114,6 +114,24 @@ namespace SessionSync
                 }
             }
 
+            // Conversations no account's list points at, e.g. from the command line.
+            var loose = new[] { new[] { "Explain this regex for log parsing", @"D:\code\scripts", "4" }, new[] { "Benchmark three JSON parsers", @"D:\code\bench", "9" } };
+            for (int i = 0; i < loose.Length; i++)
+            {
+                string project = Path.Combine(projects, Regex.Replace(loose[i][1], "[^A-Za-z0-9]", "-"));
+                Directory.CreateDirectory(project);
+                long when = now - int.Parse(loose[i][2]) * 86400000L;
+                string stamp = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(when).ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                string jsonl = Path.Combine(project, string.Format("0c1a0000-0000-4000-8000-{0:x12}", i + 1) + ".jsonl");
+                var line = new Dictionary<string, object>
+                {
+                    { "type", "user" }, { "cwd", loose[i][1] }, { "timestamp", stamp },
+                    { "message", new Dictionary<string, object> { { "role", "user" }, { "content", loose[i][0] } } },
+                };
+                File.WriteAllText(jsonl, Json.Write(line) + "\n" + new string('x', 30000) + "\n");
+                File.SetLastWriteTimeUtc(jsonl, new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(when));
+            }
+
             // Readable names, as if the app had learned them earlier.
             var known = new KnownNames();
             foreach (var a in Accounts)

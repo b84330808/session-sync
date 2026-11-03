@@ -448,6 +448,90 @@ namespace SessionSync
         }
     }
 
+    // ---------- conversations no list points at ----------
+
+    class OrphanForm : Form
+    {
+        public string Action, Target;
+        public List<Orphan> Chosen = new List<Orphan>();
+        readonly ListView list = Ui.List(L.T("標題"), 330, L.T("資料夾"), 250, L.T("最後修改"), 110, L.T("大小"), 80);
+
+        public OrphanForm(Store store, List<Account> accounts, Func<string, Color> colorOf)
+        {
+            Text = L.T("沒在清單裡的對話");
+            StartPosition = FormStartPosition.CenterParent;
+            Size = new Size(Theme.S(880), Theme.S(580));
+            MinimumSize = new Size(Theme.S(560), Theme.S(360));
+            MinimizeBox = false;
+            ShowIcon = false;
+            ShowInTaskbar = false;
+            Theme.StyleForm(this);
+
+            var body = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(Theme.S(16), Theme.S(12), Theme.S(16), 0) };
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            var intro = Ui.Text(L.T("這些對話檔在電腦上，但不在任何桌面版帳號的清單裡。可能是在命令列（Claude Code CLI）或 VS Code 用過的對話，或是清單被清掉的舊 session。"), Theme.Ui, Theme.Muted);
+            intro.MaximumSize = new Size(Theme.S(820), 0);
+            body.Controls.Add(intro, 0, 0);
+            list.CheckBoxes = true;
+            body.Controls.Add(list, 0, 1);
+            var note = Ui.Text(L.T("「加進帳號」是實驗功能：用那個帳號最新的一張卡片當範本產生新卡片。重開 Claude 後確認能不能接著聊，不行就到操作紀錄復原。"), Theme.Small, Theme.Muted);
+            note.MaximumSize = new Size(Theme.S(820), 0);
+            note.Margin = new Padding(0, Theme.S(8), 0, 0);
+            body.Controls.Add(note, 0, 2);
+
+            var close = Theme.MakeButton(L.T("關閉"));
+            close.DialogResult = DialogResult.Cancel;
+            var delete = Theme.MakeButton(L.T("永久刪除…"), "danger");
+            delete.Click += (s, e) => { if (Pick()) { Action = "delete"; DialogResult = DialogResult.OK; } };
+            var recover = Theme.MakeButton(L.T("加進帳號…"), "primary");
+            recover.Click += (s, e) =>
+            {
+                if (!Pick()) return;
+                var m = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new MenuColors()), ForeColor = Theme.Text, Font = Theme.Ui };
+                foreach (var a in accounts)
+                {
+                    var acct = a;
+                    m.Items.Add(new ToolStripMenuItem(a.Name, null, (x, y) => { Action = "recover"; Target = acct.Key; DialogResult = DialogResult.OK; }) { ForeColor = colorOf(a.Key) });
+                }
+                m.Show(recover, new Point(0, recover.Height));
+            };
+            var show = Theme.MakeButton(L.T("顯示檔案"));
+            show.Click += (s, e) =>
+            {
+                var o = list.SelectedItems.Count > 0 ? list.SelectedItems[0].Tag as Orphan : null;
+                if (o != null) Process.Start("explorer.exe", "/select,\"" + o.Path + "\"");
+            };
+            Controls.Add(body);
+            Controls.Add(Ui.Buttons(close, delete, recover, show));
+            CancelButton = close;
+            Theme.Apply(this);
+            Load += (s, e) => Fill(store);
+        }
+
+        void Fill(Store store)
+        {
+            UseWaitCursor = true;
+            list.BeginUpdate();
+            foreach (var o in store.Orphans())
+                list.Items.Add(new ListViewItem(new[] { o.Title ?? L.T("(沒有標題)"), o.Cwd ?? "", Theme.When(o.LastWriteMs), Theme.Bytes(o.Size) })
+                    { Tag = o, ForeColor = o.Title == null ? Theme.Muted : Theme.Text });
+            list.EndUpdate();
+            UseWaitCursor = false;
+        }
+
+        // Checked rows, or the selected ones when nothing is checked.
+        bool Pick()
+        {
+            var rows = list.CheckedItems.Count > 0 ? list.CheckedItems.Cast<ListViewItem>() : list.SelectedItems.Cast<ListViewItem>();
+            Chosen = rows.Select(i => (Orphan)i.Tag).ToList();
+            if (Chosen.Count > 0) return true;
+            MessageBox.Show(this, L.T("先勾選要處理的對話。"), Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+    }
+
     // ---------- small text prompt ----------
 
     static class Prompt

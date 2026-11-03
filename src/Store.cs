@@ -94,6 +94,12 @@ namespace SessionSync
         public List<string> Paths = new List<string>();
     }
 
+    class Orphan
+    {
+        public string Id, Path, Title, Cwd;
+        public long Size, LastWriteMs, FirstMs;
+    }
+
     class AccountPurgePlan
     {
         public Account Account;
@@ -139,6 +145,24 @@ namespace SessionSync
 
         // Demo mode works on made-up data, so the real Claude app's state doesn't apply.
         public static bool Demo;
+
+        // Set by --trust-format: allow changes even when the files don't look as expected.
+        public static bool TrustFormat;
+        public const long BusyMs = 3 * 60 * 1000;
+
+        // What the last scan found odd about Claude's files. Any entry makes the store read-only,
+        // because writing into a layout we don't understand could corrupt Claude's lists.
+        public List<string> FormatIssues = new List<string>();
+        public bool ReadOnly { get { return FormatIssues.Count > 0 && !TrustFormat; } }
+
+        // Conversation files on disk that no account's list points at.
+        public List<string> OrphanIds = new List<string>();
+        Dictionary<string, string> lastTranscripts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        void Guard()
+        {
+            if (ReadOnly) throw new InvalidOperationException(L.F("唯讀模式：{0}", FormatIssues[0]));
+        }
 
         public List<string> Roots;
         public string ProjectsDir, DataDir, HistoryDir, SettingsPath;
@@ -331,6 +355,8 @@ namespace SessionSync
             var transcripts = TranscriptIndex();
             var list = new List<Account>();
             bool multi = Roots.Count > 1;
+            var issues = new List<string>();
+            int cardsSeen = 0, cardsOdd = 0;
 
             for (int ri = 0; ri < Roots.Count; ri++)
             {
@@ -345,7 +371,8 @@ namespace SessionSync
                     {
                         string orgUuid = Path.GetFileName(oDir);
                         if (!UuidRe.IsMatch(orgUuid)) continue;
-                        string labelKey = acctUuid + "/" + orgUuid;
+                        // With several Claude data folders, the folder name keeps the same account apart.
+                        string labelKey = (multi ? Path.GetFileName(Path.GetDirectoryName(root)) + ":" : "") + acctUuid + "/" + orgUuid;
                         string mail, person, orgName;
                         names.Email.TryGetValue(acctUuid, out mail);
                         names.Person.TryGetValue(acctUuid, out person);
@@ -353,7 +380,7 @@ namespace SessionSync
                         object lbl;
                         var acct = new Account
                         {
-                            Key = multi ? ri + ":" + labelKey : labelKey,
+                            Key = labelKey,
                             LabelKey = labelKey,
                             Root = root,
                             Dir = oDir,
@@ -366,6 +393,8 @@ namespace SessionSync
                             Current = string.Equals(current, acctUuid, StringComparison.OrdinalIgnoreCase),
                         };
                         var archived = ReadArchiveIndex(oDir);
+                        string idxVersion = ArchiveIndexVersion(oDir);
+                        if (idxVersion != null && idxVersion != "1") issues.Add(L.F("archived-sessions.idx 的版本是 {0}", idxVersion));
                         foreach (var f in Directory.GetFiles(oDir))
                         {
                             string fn = Path.GetFileName(f);
@@ -377,6 +406,8 @@ namespace SessionSync
                                 {
                                     var c = ReadCard(f).Fresh();
                                     c.Id = id;
+                                    cardsSeen++;
+                                    if (!string.Equals(c.SessionId, "local_" + id, StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(c.CliSessionId)) cardsOdd++;
                                     c.Archived = c.Archived || archived.Contains("local_" + id);
                                     string tp = null;
                                     if (c.CliSessionId != null) transcripts.TryGetValue(c.CliSessionId, out tp);
@@ -405,6 +436,15 @@ namespace SessionSync
                     }
                 }
             }
+
+            // A few odd cards can be mid-write; many mean the layout has changed.
+            if (cardsSeen > 0 && cardsOdd > Math.Max(2, cardsSeen / 5))
+                issues.Add(L.F("{0} 張卡片的格式和預期不同", cardsOdd));
+            FormatIssues = issues;
+
+            var used = new HashSet<string>(list.SelectMany(a => a.Cards).Where(c => c.CliSessionId != null).Select(c => c.CliSessionId), StringComparer.OrdinalIgnoreCase);
+            OrphanIds = transcripts.Keys.Where(k => UuidRe.IsMatch(k) && !used.Contains(k)).ToList();
+            lastTranscripts = transcripts;
 
             foreach (var a in list)
                 a.OtherOrgsInUse = list.Any(o => o != a && o.AccountUuid == a.AccountUuid && o.Cards.Count > 0);
@@ -437,6 +477,16 @@ namespace SessionSync
         }
 
         static long SafeLength(string p) { try { return new FileInfo(p).Length; } catch { return 0; } }
+
+        static string ArchiveIndexVersion(string dir)
+        {
+            try
+            {
+                var idx = Json.ParseObject(File.ReadAllText(Path.Combine(dir, ArchiveIdx), Fs.Utf8));
+                return idx.ContainsKey("v") ? Convert.ToString(idx["v"], System.Globalization.CultureInfo.InvariantCulture) : null;
+            }
+            catch { return null; }
+        }
 
         static HashSet<string> ReadArchiveIndex(string dir)
         {
@@ -510,7 +560,29 @@ namespace SessionSync
         [DllImport("kernel32.dll")]
         static extern bool CloseHandle(IntPtr h);
 
+        public static string ProcessPath(Process p)
+        {
+            try
+            {
+                IntPtr h = OpenProcess(0x1000, false, p.Id);
+                if (h == IntPtr.Zero) return null;
+                try
+                {
+                    var sb = new StringBuilder(1024);
+                    int size = sb.Capacity;
+                    return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString() : null;
+                }
+                finally { CloseHandle(h); }
+            }
+            catch { return null; }
+        }
+
         // The desktop app and its bundled CLI are both claude.exe; tell them apart by path.
+        public static bool IsDesktopPath(string path)
+        {
+            return path != null && !Regex.IsMatch(path, @"[\\/]claude-code(-vm)?[\\/]", RegexOptions.IgnoreCase);
+        }
+
         public static bool DesktopRunning()
         {
             if (Demo) return false;
@@ -584,6 +656,7 @@ namespace SessionSync
         {
             CheckIds(ids);
             Scan();
+            Guard();
             var src = Get(from);
             var dst = Get(to);
             if (src == dst) throw new InvalidOperationException(L.T("來源和目標是同一個帳號"));
@@ -623,6 +696,7 @@ namespace SessionSync
         {
             CheckIds(ids);
             Scan();
+            Guard();
             var a = Get(from);
             var j = new Journal(HistoryDir, L.F("從 {0} 移除 {1} 個 session", a.Name, ids.Count), "remove");
             var r = new OpResult();
@@ -690,6 +764,7 @@ namespace SessionSync
         {
             CheckIds(ops.Select(x => x.Id));
             Scan();
+            Guard();
             var j = new Journal(HistoryDir, label ?? L.F("完整同步：{0} 項", ops.Count), "sync");
             var r = new OpResult();
             try
@@ -781,6 +856,7 @@ namespace SessionSync
         public OpResult Purge(IList<string> ids)
         {
             var plan = PlanPurge(ids);
+            Guard();
             var j = new Journal(HistoryDir, L.F("永久刪除 {0} 個 session 的對話", plan.Count), "purge", false);
             var r = new OpResult();
             try
@@ -861,10 +937,263 @@ namespace SessionSync
 
         public List<Dictionary<string, object>> History() { return Journal.List(HistoryDir); }
 
+        // ---------- conversations no list points at ----------
+
+        static long ToMs(DateTime utc) { return (long)(utc - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds; }
+
+        public List<Orphan> Orphans()
+        {
+            Scan();
+            var list = new List<Orphan>();
+            foreach (var id in OrphanIds)
+            {
+                string p;
+                if (lastTranscripts.TryGetValue(id, out p)) list.Add(ReadOrphan(id, p));
+            }
+            return list.OrderByDescending(o => o.LastWriteMs).ToList();
+        }
+
+        // Title, folder and start time from the first lines of a transcript.
+        public static Orphan ReadOrphan(string id, string path)
+        {
+            var o = new Orphan { Id = id, Path = path };
+            try
+            {
+                var fi = new FileInfo(path);
+                o.Size = fi.Length;
+                o.LastWriteMs = ToMs(fi.LastWriteTimeUtc);
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var r = new StreamReader(fs, Fs.Utf8))
+                {
+                    string line;
+                    int n = 0;
+                    long read = 0;
+                    while ((line = r.ReadLine()) != null && n++ < 300 && read < 8000000)
+                    {
+                        read += line.Length;
+                        if (line.Length > 400000) continue;
+                        Dictionary<string, object> j;
+                        try { j = Json.ParseObject(line); } catch { continue; }
+                        if (o.Cwd == null) o.Cwd = Json.Str(j, "cwd");
+                        if (o.FirstMs == 0)
+                        {
+                            DateTime t;
+                            string ts = Json.Str(j, "timestamp");
+                            if (ts != null && DateTime.TryParse(ts, System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out t))
+                                o.FirstMs = ToMs(t);
+                        }
+                        if (o.Title == null && Json.Str(j, "type") == "user" && !Json.Bool(j, "isMeta")) o.Title = FirstText(j);
+                        if (o.Title != null && o.Cwd != null && o.FirstMs != 0) break;
+                    }
+                }
+            }
+            catch { }
+            return o;
+        }
+
+        static string FirstText(Dictionary<string, object> j)
+        {
+            var msg = j.ContainsKey("message") ? j["message"] as Dictionary<string, object> : null;
+            if (msg == null) return null;
+            object c = msg.ContainsKey("content") ? msg["content"] : null;
+            string s = c as string;
+            if (s == null && c is System.Collections.IEnumerable)
+                foreach (var part in (System.Collections.IEnumerable)c)
+                {
+                    var d = part as Dictionary<string, object>;
+                    if (d != null && Json.Str(d, "type") == "text") { s = Json.Str(d, "text"); break; }
+                }
+            // Command and system wrappers start with a tag; the first real prompt makes a better title.
+            if (string.IsNullOrWhiteSpace(s) || s.TrimStart().StartsWith("<")) return null;
+            s = Regex.Replace(s.Trim(), @"\s+", " ");
+            return s.Length > 90 ? s.Substring(0, 90) + "…" : s;
+        }
+
+        // Transcript, its side folder and its file-history, only inside Claude's own folders.
+        List<string> TranscriptPaths(string cli, string jsonl)
+        {
+            string configDir = Path.GetDirectoryName(ProjectsDir);
+            string projectsRoot = Path.GetFullPath(ProjectsDir).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+            string historyRoot = configDir == null ? null : Path.GetFullPath(Path.Combine(configDir, "file-history")).TrimEnd('\\', '/') + Path.DirectorySeparatorChar;
+            var paths = new List<string>();
+            if (historyRoot != null) paths.Add(Path.Combine(historyRoot, cli));
+            paths.Add(Path.Combine(Path.GetDirectoryName(jsonl), cli));
+            paths.Add(jsonl);
+            return paths.Select(Path.GetFullPath)
+                .Where(p => p.StartsWith(projectsRoot, StringComparison.OrdinalIgnoreCase) || (historyRoot != null && p.StartsWith(historyRoot, StringComparison.OrdinalIgnoreCase)))
+                .Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
+        }
+
+        string OrphanPath(string id, Item item)
+        {
+            string jsonl;
+            if (!UuidRe.IsMatch(id ?? "") || !OrphanIds.Contains(id) || !lastTranscripts.TryGetValue(id, out jsonl))
+            {
+                item.Reason = L.T("已經不是沒在清單裡的對話");
+                return null;
+            }
+            if (Fs.NowMs() - ToMs(File.GetLastWriteTimeUtc(jsonl)) < BusyMs)
+            {
+                item.Reason = L.T("最近 3 分鐘內還有寫入，可能正在使用");
+                return null;
+            }
+            return jsonl;
+        }
+
+        public OpResult PurgeOrphans(IList<string> cliIds)
+        {
+            Scan();
+            Guard();
+            var j = new Journal(HistoryDir, L.F("永久刪除 {0} 個沒在清單裡的對話", cliIds.Count), "purge", false);
+            var r = new OpResult();
+            try
+            {
+                foreach (var id in cliIds)
+                {
+                    var item = new Item { Id = id, Title = id, Type = "purged" };
+                    string jsonl = OrphanPath(id, item);
+                    if (jsonl == null) { r.Skipped.Add(item); continue; }
+                    item.Title = ReadOrphan(id, jsonl).Title ?? id;
+                    try
+                    {
+                        foreach (var p in TranscriptPaths(id, jsonl))
+                        {
+                            r.Bytes += SizeOf(p);
+                            if (File.Exists(p)) File.Delete(p);
+                            else if (Directory.Exists(p)) Directory.Delete(p, true);
+                            j.Purged.Add(p);
+                        }
+                        r.Done.Add(item);
+                    }
+                    catch (Exception e)
+                    {
+                        if (!IsFileError(e)) throw;
+                        item.Reason = L.F("檔案操作失敗：{0}", e.Message);
+                        r.Skipped.Add(item);
+                    }
+                }
+            }
+            finally { r.BatchId = j.Commit(r.Done.Count, r.Skipped.Count); cache.Clear(); }
+            return r;
+        }
+
+        // Fields that belong to one live session and must not be carried into a new card.
+        static readonly string[] SessionOnlyKeys = {
+            "bridgeSessionIds", "postTurnSummary", "postTurnSummaryFor", "lastAssistantUuid", "turnWrapUp",
+            "interruptedAwaitingPerson", "latestUserFrameAt", "lastTurnEdgeAt", "titleTurn", "spawnSeed",
+            "lastSpawnRootDetected", "alwaysAllowedReasons", "sessionPermissionUpdates", "steeredByRemoteClient" };
+
+        // Experimental: gives orphan conversations a sidebar card in one account. The account's
+        // newest card is the template for the app's own settings; session fields come from the transcript.
+        public OpResult Recover(IList<string> cliIds, string toKey)
+        {
+            Scan();
+            Guard();
+            var dst = Get(toKey);
+            var template = dst.Cards.Where(c => c.Broken == null).OrderByDescending(c => c.LastActivityAt).FirstOrDefault();
+            Account templateAccount = dst;
+            if (template == null)
+                foreach (var a in Accounts)
+                {
+                    var c = a.Cards.Where(x => x.Broken == null).OrderByDescending(x => x.LastActivityAt).FirstOrDefault();
+                    if (c != null && (template == null || c.LastActivityAt > template.LastActivityAt)) { template = c; templateAccount = a; }
+                }
+            if (template == null) throw new InvalidOperationException(L.T("需要至少一張現有的卡片當範本"));
+            var raw = ReadRaw(templateAccount, template.Id);
+            var j = new Journal(HistoryDir, L.F("把 {0} 個對話加進 {1}", cliIds.Count, dst.Name), "recover");
+            var r = new OpResult();
+            try
+            {
+                foreach (var id in cliIds)
+                {
+                    var item = new Item { Id = id, Title = id, To = toKey, Type = "added" };
+                    string jsonl = OrphanPath(id, item);
+                    if (jsonl == null) { r.Skipped.Add(item); continue; }
+                    var o = ReadOrphan(id, jsonl);
+                    item.Title = o.Title ?? id;
+                    if (string.IsNullOrEmpty(o.Cwd)) { item.Reason = L.T("對話檔裡找不到工作資料夾"); r.Skipped.Add(item); continue; }
+                    var card = new Dictionary<string, object>(raw);
+                    foreach (var k in SessionOnlyKeys) card.Remove(k);
+                    string newId = Guid.NewGuid().ToString();
+                    card["sessionId"] = "local_" + newId;
+                    card["cliSessionId"] = id;
+                    card["title"] = o.Title ?? L.T("(未命名)");
+                    card["titleSource"] = "auto";
+                    card["cwd"] = o.Cwd;
+                    card["originCwd"] = o.Cwd;
+                    if (card.ContainsKey("gitAnchorsFolderRealpath")) card["gitAnchorsFolderRealpath"] = o.Cwd;
+                    card["createdAt"] = o.FirstMs > 0 ? o.FirstMs : o.LastWriteMs;
+                    card["lastActivityAt"] = o.LastWriteMs;
+                    card["lastFocusedAt"] = o.LastWriteMs;
+                    card["completedTurns"] = CountTurns(jsonl);
+                    card["isArchived"] = false;
+                    try
+                    {
+                        j.Write(CardPath(dst, newId), Json.Write(card));
+                        item.Id = newId;
+                        r.Done.Add(item);
+                    }
+                    catch (Exception e)
+                    {
+                        if (!IsFileError(e)) throw;
+                        item.Reason = L.F("檔案操作失敗：{0}", e.Message);
+                        r.Skipped.Add(item);
+                    }
+                }
+            }
+            finally { r.BatchId = j.Commit(r.Done.Count, r.Skipped.Count); cache.Clear(); }
+            return r;
+        }
+
+        // Prompts typed by the user. Tool results, meta lines and command/system wrappers
+        // (content starting with a tag) are "user" lines too and don't count.
+        static int CountTurns(string path)
+        {
+            int n = 0;
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                using (var r = new StreamReader(fs, Fs.Utf8))
+                {
+                    string line;
+                    while ((line = r.ReadLine()) != null)
+                        if (line.Contains("\"type\":\"user\"") && !line.Contains("\"tool_result\"") && !line.Contains("\"isMeta\":true")
+                            && !line.Contains("\"content\":\"<")) n++;
+                }
+            }
+            catch { }
+            return n;
+        }
+
+        // Undo writes its own batch, so it can be undone again (redo). Undoing that batch
+        // puts the original back and needs no further entry. The result carries "redoId"
+        // (the new batch) when there is one.
         public Dictionary<string, object> Undo(string id, bool force = false)
         {
-            var m = Journal.Undo(HistoryDir, id, force);
-            cache.Clear();
+            Scan();
+            Guard();
+            var target = Journal.Load(HistoryDir, id);
+            if (Json.Str(target, "kind") == "undo")
+            {
+                var back = Journal.Undo(HistoryDir, id, force);
+                cache.Clear();
+                return back;
+            }
+            var redo = new Journal(HistoryDir, L.F("復原：{0}", Json.Str(target, "label")), "undo")
+            {
+                Reverts = id,
+                RevertsLabel = Json.Str(target, "label"),
+            };
+            Dictionary<string, object> m = null;
+            string redoId = null;
+            try { m = Journal.Undo(HistoryDir, id, force, redo); }
+            finally
+            {
+                redoId = redo.Commit(0, 0);
+                cache.Clear();
+            }
+            m["redoId"] = redoId;
             return m;
         }
     }

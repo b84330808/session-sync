@@ -46,6 +46,8 @@ namespace SessionSync
         readonly ToolTip tip = new ToolTip { InitialDelay = 300, ReshowDelay = 100 };
         string tipKey, signature;
         Point hoverCell = new Point(-1, -1);
+        // Column the keyboard acts on in the focused row (Left/Right to move, Space to click).
+        public int FocusColumn = -1;
         static readonly Font IconFont = PickIconFont();
 
         public IndexView()
@@ -246,13 +248,39 @@ namespace SessionSync
                 TextRenderer.DrawText(g, c.CompletedTurns.ToString(), Theme.Ui, Rectangle.Inflate(r, -Theme.S(8), 0), Theme.Muted, one | TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
                 return;
             }
-            if (e.ColumnIndex == TrashColumn)
+            if (e.ColumnIndex == TrashColumn) DrawTrash(g, r, hover);
+            else
             {
-                DrawTrash(g, r, hover);
+                var a = AccountAt(e.ColumnIndex);
+                if (a != null) DrawCell(g, r, StateOf(row, a), ColorOfKey(a.Key), hover);
+            }
+            if (e.Item.Focused && e.ColumnIndex == FocusColumn && Focused)
+                using (var pen = new Pen(Theme.Accent, 1.5f) { DashStyle = DashStyle.Dash })
+                    g.DrawRectangle(pen, Rectangle.Inflate(r, -Theme.S(4), -Theme.S(4)));
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if ((e.KeyCode == Keys.Left || e.KeyCode == Keys.Right) && Items.Count > 0)
+            {
+                int step = e.KeyCode == Keys.Right ? 1 : -1;
+                FocusColumn = FocusColumn < FixedColumns ? FixedColumns : Math.Max(FixedColumns, Math.Min(TrashColumn, FocusColumn + step));
+                if (FocusedItem == null) { Items[0].Focused = true; Items[0].Selected = true; }
+                Invalidate(FocusedItem.Bounds);
+                e.Handled = true;
                 return;
             }
-            var a = AccountAt(e.ColumnIndex);
-            if (a != null) DrawCell(g, r, StateOf(row, a), ColorOfKey(a.Key), hover);
+            if (e.KeyCode == Keys.Space && FocusedItem != null && FocusColumn >= FixedColumns)
+            {
+                var row = RowAt(FocusedItem.Index);
+                var a = AccountAt(FocusColumn);
+                if (a != null) { if (CellClicked != null) CellClicked(row, a, StateOf(row, a)); }
+                else if (FocusColumn == TrashColumn && DeleteClicked != null) DeleteClicked(row);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+            base.OnKeyDown(e);
         }
 
         static void DrawTrash(Graphics g, Rectangle r, bool hover)
@@ -382,6 +410,7 @@ namespace SessionSync
             if (e.Button != MouseButtons.Left || ModifierKeys != Keys.None) return;
             var cell = CellAt(e.Location);
             if (cell.X < FixedColumns || cell.Y < 0) return;
+            FocusColumn = cell.X;
             tip.Hide(this);
             var row = RowAt(cell.Y);
             var a = AccountAt(cell.X);

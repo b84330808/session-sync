@@ -298,6 +298,62 @@ namespace SessionSync.Tests
             var hist = store.History();
             Check(hist.Any(m => Json.Str(m, "kind") == "purge" && !Json.Bool(m, "undoable")), "history records the permanent deletes");
 
+            // Keyboard: Right picks the first account column, Right again the next, Space clicks it.
+            Func<Keys, KeyEventArgs> key = k => new KeyEventArgs(k);
+            var onKey = typeof(IndexView).GetMethod("OnKeyDown", BindingFlags.Instance | BindingFlags.NonPublic);
+            r = RowOf(v, "Translate docs to Japanese");
+            var notes = v.RowAt(r);
+            Check(v.StateOf(notes, acct(B)) == CellState.Absent, "picked a session account B lacks");
+            v.Focus();
+            v.Items[r].Selected = true;
+            v.Items[r].Focused = true;
+            v.FocusColumn = -1;
+            onKey.Invoke(v, new object[] { key(Keys.Right) });
+            onKey.Invoke(v, new object[] { key(Keys.Right) });
+            Check(v.FocusColumn == ColOf(v, B), "arrows move to the second account column");
+            onKey.Invoke(v, new object[] { key(Keys.Space) });
+            Pump(300);
+            Check(store.Get(acct(B).Key).Find(notes.Id) != null, "Space clicks the focused cell");
+
+            // Undo, then redo, from the status bar link.
+            var undoLink = Field<LinkLabel>(form, "linkUndo");
+            Call(form, "UndoBatch", Field<string>(form, "lastBatch"));
+            Pump(300);
+            Check(store.Get(acct(B).Key).Find(notes.Id) == null && undoLink.Visible && undoLink.Text == "重做", "undo offers redo (card " + (store.Get(acct(B).Key).Find(notes.Id) != null)
+                + ", link " + undoLink.Visible + " '" + undoLink.Text + "', status '" + status.Text + "', dialogs " + dialogs.Count + " last '" + (dialogs.Count > 0 ? dialogs.Last() : "") + "')");
+            Call(form, "UndoBatch", Field<string>(form, "lastBatch"));
+            Pump(300);
+            Check(store.Get(acct(B).Key).Find(notes.Id) != null && undoLink.Text == "復原", "redo brings it back");
+
+            // Conversations in no list: the link, the dialog, and adding one to an account.
+            var orphanLink = Field<LinkLabel>(form, "orphanLink");
+            Check(orphanLink.Visible && orphanLink.Text.Contains("2"), "toolbar shows the 2 loose conversations: " + orphanLink.Text);
+            var loose = store.Orphans();
+            Check(loose.Count == 2 && loose.All(o => o.Title != null && o.Cwd != null), "titles and folders read from the transcripts");
+            answers.Enqueue(IDYES);
+            Call(form, "DoRecover", new List<Orphan> { loose[0] }, acct(A).Key);
+            Pump(300);
+            Check(store.OrphanIds.Count == 1 && store.Get(acct(A).Key).Cards.Any(c => c.CliSessionId == loose[0].Id), "added to an account, no longer loose");
+
+            // Restart is offered only when Claude desktop runs (never in demo mode).
+            Check(!Field<Button>(form, "restartBtn").Visible, "no restart button without Claude running");
+
+            // An unknown layout locks the window.
+            string idx = Path.Combine(acct(A).Dir, "archived-sessions.idx");
+            string idxBefore = File.Exists(idx) ? File.ReadAllText(idx) : null;
+            File.WriteAllText(idx, "{\"v\":9,\"archived\":[]}");
+            Call(form, "RefreshAll");
+            Pump(300);
+            var banner = Field<Label>(form, "banner");
+            Check(banner.Visible && banner.Text.Contains("9"), "red banner names the problem");
+            r = RowOf(v, "Refactor auth middleware");
+            ClickCell(v, r, ColOf(v, A));
+            Check(store.Get(acct(A).Key).Find(v.RowAt(r).Id) == null && status.Text.StartsWith("唯讀模式"), "clicks change nothing in read-only mode");
+            if (idxBefore != null) File.WriteAllText(idx, idxBefore); else File.Delete(idx);
+            Call(form, "RefreshAll");
+            Pump(300);
+            Check(!banner.Visible, "banner goes away once the layout is known again");
+
             // English UI on the same data.
             form.Close();
             Pump(200);
@@ -338,6 +394,15 @@ namespace SessionSync.Tests
                 Pump(400);
                 Shot(det, "detail");
                 det.Close();
+            }
+
+            using (var orphans = new OrphanForm(store, store.Accounts.Where(a => a.InUse).ToList(), k => Theme.Faint)
+                { StartPosition = FormStartPosition.Manual, Location = new Point(80, 60) })
+            {
+                orphans.Show(form);
+                Pump(500);
+                Shot(orphans, "orphans");
+                orphans.Close();
             }
 
             shotNextDialog = "delete-confirm";

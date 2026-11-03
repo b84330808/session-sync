@@ -21,6 +21,8 @@ namespace SessionSync
         readonly CheckBox showArchived = new CheckBox();
         readonly LinkLabel hiddenLink = new LinkLabel();
         readonly LinkLabel langLink = new LinkLabel();
+        readonly LinkLabel orphanLink = new LinkLabel();
+        readonly Button restartBtn = Theme.MakeButton(L.T("重開 Claude"));
 
         // Set when the language changes; Program then opens a fresh window in that language.
         public bool Relaunch;
@@ -105,13 +107,13 @@ namespace SessionSync
                 Dock = DockStyle.Top,
                 Height = Theme.S(52),
                 RowCount = 1,
-                ColumnCount = 9,
+                ColumnCount = 11,
                 GrowStyle = TableLayoutPanelGrowStyle.FixedSize,
                 BackColor = Theme.Panel,
                 Padding = new Padding(Theme.S(12), 0, Theme.S(10), 0),
             };
             bar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 9; i++) bar.ColumnStyles.Add(i == 4 ? new ColumnStyle(SizeType.Percent, 100) : new ColumnStyle(SizeType.AutoSize));
+            for (int i = 0; i < 11; i++) bar.ColumnStyles.Add(i == 5 ? new ColumnStyle(SizeType.Percent, 100) : new ColumnStyle(SizeType.AutoSize));
 
             var brand = new Label { Text = L.T("Session 同步器"), Font = Theme.Big, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 0, Theme.S(14), 0) };
             search.Width = Theme.S(260);
@@ -132,6 +134,17 @@ namespace SessionSync
             hiddenLink.Margin = new Padding(Theme.S(14), 0, 0, 0);
             hiddenLink.Visible = false;
             hiddenLink.LinkClicked += (s, e) => ShowHiddenMenu();
+
+            orphanLink.AutoSize = true;
+            orphanLink.Anchor = AnchorStyles.Left;
+            orphanLink.LinkBehavior = LinkBehavior.HoverUnderline;
+            orphanLink.Margin = new Padding(Theme.S(14), 0, 0, 0);
+            orphanLink.Visible = false;
+            orphanLink.LinkClicked += (s, e) => OpenOrphans();
+
+            restartBtn.Anchor = AnchorStyles.Right;
+            restartBtn.Visible = false;
+            restartBtn.Click += (s, e) => RestartClaude();
 
             langLink.AutoSize = true;
             langLink.Anchor = AnchorStyles.Right;
@@ -157,10 +170,12 @@ namespace SessionSync
             bar.Controls.Add(search, 1, 0);
             bar.Controls.Add(showArchived, 2, 0);
             bar.Controls.Add(hiddenLink, 3, 0);
-            bar.Controls.Add(sync, 5, 0);
-            bar.Controls.Add(hist, 6, 0);
-            bar.Controls.Add(refresh, 7, 0);
-            bar.Controls.Add(langLink, 8, 0);
+            bar.Controls.Add(orphanLink, 4, 0);
+            bar.Controls.Add(restartBtn, 6, 0);
+            bar.Controls.Add(sync, 7, 0);
+            bar.Controls.Add(hist, 8, 0);
+            bar.Controls.Add(refresh, 9, 0);
+            bar.Controls.Add(langLink, 10, 0);
             bar.Paint += (s, e) => { using (var p = new Pen(Theme.Line)) e.Graphics.DrawLine(p, 0, bar.Height - 1, bar.Width, bar.Height - 1); };
             Controls.Add(bar);
         }
@@ -215,7 +230,7 @@ namespace SessionSync
             hint.Anchor = AnchorStyles.Right;
             hint.ForeColor = Theme.Faint;
             hint.Font = Theme.Small;
-            hint.Text = L.T("點圓點＝加入／移除　🗑＝永久刪除　點帳號名稱＝帳號選單　雙擊＝詳細　右鍵＝更多");
+            hint.Text = L.T("點圓點＝加入／移除　🗑＝永久刪除　←→＋空白鍵＝鍵盤操作　點帳號名稱＝帳號選單　雙擊＝詳細");
             bar.Controls.Add(status, 0, 0);
             bar.Controls.Add(linkUndo, 1, 0);
             bar.Controls.Add(linkOverwrite, 2, 0);
@@ -453,10 +468,35 @@ namespace SessionSync
 
         void UpdateRunning()
         {
-            bool r = Store.DesktopRunning();
-            if (r == desktopRunning && banner.Visible == r) return;
-            desktopRunning = r;
-            banner.Visible = r;
+            desktopRunning = Store.DesktopRunning();
+            restartBtn.Visible = desktopRunning;
+            UpdateBanner();
+        }
+
+        void UpdateBanner()
+        {
+            if (store.ReadOnly)
+            {
+                banner.Text = L.F("偵測到不認得的 Claude 資料格式（{0}），為了安全目前只能瀏覽、不能修改。Claude 更新後可能會這樣，請等本程式更新。", store.FormatIssues[0]);
+                banner.BackColor = Theme.Danger;
+                banner.ForeColor = Color.White;
+                banner.Visible = true;
+            }
+            else
+            {
+                banner.Text = L.T("Claude 桌面版正在執行：加進去的 session 要重開 Claude 才會出現在側欄。要移除或覆蓋「目前登入」帳號的卡片，建議先關閉 Claude，不然它可能把卡片寫回去。");
+                banner.BackColor = Theme.WarnBg;
+                banner.ForeColor = Theme.WarnText;
+                banner.Visible = desktopRunning;
+            }
+        }
+
+        // Read-only mode: say why instead of doing anything.
+        bool Locked()
+        {
+            if (!store.ReadOnly) return false;
+            ShowStatus(L.F("唯讀模式：{0}", store.FormatIssues[0]), Theme.Danger);
+            return true;
         }
 
         void Render()
@@ -471,6 +511,10 @@ namespace SessionSync
                 && (showArchived.Checked || !r.Newest.Archived)
                 && (q.Length == 0 || (r.Newest.Title + " " + r.Newest.Cwd).ToLowerInvariant().Contains(q))).ToList();
             index.SetData(visible, shownRows);
+            int orphans = store.OrphanIds.Count;
+            orphanLink.Visible = orphans > 0;
+            orphanLink.Text = L.F("沒在清單裡的對話（{0}）", orphans);
+            UpdateBanner();
             int n = HiddenAccounts().Count;
             hiddenLink.Visible = n > 0;
             hiddenLink.Text = L.F("隱藏的帳號（{0}）", n) + " ▾";
@@ -481,6 +525,7 @@ namespace SessionSync
         // Adds each session to every listed account that lacks it (or has an older copy), as one undoable batch.
         void AddEverywhere(List<SessionRow> rows, List<Account> targets)
         {
+            if (Locked()) return;
             var ops = new List<Item>();
             int left = 0;
             foreach (var r in rows)
@@ -507,6 +552,7 @@ namespace SessionSync
 
         void DoTransfer(string from, string to, List<string> ids, bool move, bool overwrite)
         {
+            if (Locked()) return;
             Account src, dst;
             try { src = store.Get(from); dst = store.Get(to); }
             catch (Exception e) { ShowStatus(e.Message, Theme.Danger); return; }
@@ -532,6 +578,7 @@ namespace SessionSync
 
         void DoRemove(string from, List<string> ids)
         {
+            if (Locked()) return;
             Account a;
             try { a = store.Get(from); } catch (Exception e) { ShowStatus(e.Message, Theme.Danger); return; }
             var cards = ids.Select(a.Find).Where(c => c != null).ToList();
@@ -587,6 +634,7 @@ namespace SessionSync
         // Deletes the conversation files for good, after one clear confirmation.
         void DoPurge(List<string> ids)
         {
+            if (Locked()) return;
             List<PurgeTarget> plan;
             try { plan = store.PlanPurge(ids); }
             catch (Exception e) { ShowStatus(e.Message, Theme.Danger); return; }
@@ -630,6 +678,7 @@ namespace SessionSync
         // sessions other accounts also have are only taken off this account.
         void DoPurgeAccount(string key)
         {
+            if (Locked()) return;
             AccountPurgePlan p;
             try { p = store.PlanAccountPurge(key); }
             catch (Exception e) { ShowStatus(e.Message, Theme.Danger); return; }
@@ -674,18 +723,36 @@ namespace SessionSync
             RefreshAll();
         }
 
+        // The status-bar link toggles: after an undo it offers redo, after a redo it offers undo again.
         void UndoBatch(string id)
         {
+            if (Locked()) return;
             try
             {
                 var m = Undo(this, store, id);
-                if (m != null) ShowStatus(L.F("已復原：{0}", Json.Str(m, "label")), Theme.Ok);
+                if (m != null)
+                {
+                    string reverted = Json.Str(m, "reverts"), redoId = Json.Str(m, "redoId");
+                    if (reverted != null)
+                    {
+                        ShowStatus(L.F("已重做：{0}", Json.Str(m, "revertsLabel")), Theme.Ok);
+                        lastBatch = reverted;
+                        linkUndo.Text = L.T("復原");
+                        linkUndo.Visible = true;
+                    }
+                    else
+                    {
+                        ShowStatus(L.F("已復原：{0}", Json.Str(m, "label")), Theme.Ok);
+                        lastBatch = redoId;
+                        linkUndo.Text = L.T("重做");
+                        linkUndo.Visible = redoId != null;
+                    }
+                }
             }
             catch (Exception e) { ShowStatus(L.F("無法復原：{0}", e.Message), Theme.Danger); }
             RefreshAll();
         }
 
-        // doneFormat / noneFormat are table keys, e.g. "已複製 {0} 個 session".
         // Undo, asking first when files changed after the operation. Null when the user declines.
         public static Dictionary<string, object> Undo(IWin32Window owner, Store store, string id)
         {
@@ -698,6 +765,7 @@ namespace SessionSync
             }
         }
 
+        // doneFormat / noneFormat are table keys, e.g. "已複製 {0} 個 session".
         void Report(OpResult r, string doneFormat, string noneFormat, Account dst, Action<List<string>> retry)
         {
             string msg = r.Done.Count > 0
@@ -710,6 +778,7 @@ namespace SessionSync
             var over = r.Skipped.Where(s => s.CanOverwrite).Select(s => s.Id).ToList();
             pendingOverwrite = retry != null && over.Count > 0 ? (Action)(() => retry(over)) : null;
             ShowStatus(msg, r.Done.Count > 0 ? Theme.Ok : Theme.WarnText);
+            linkUndo.Text = L.T("復原");
             linkUndo.Visible = r.BatchId != null;
             linkOverwrite.Text = L.F("仍要覆蓋 {0} 個", over.Count);
             linkOverwrite.Visible = pendingOverwrite != null;
@@ -773,8 +842,82 @@ namespace SessionSync
             }
         }
 
+        void OpenOrphans()
+        {
+            using (var f = new OrphanForm(store, VisibleAccounts(), k => colors.ContainsKey(k) ? colors[k] : Theme.Faint))
+            {
+                if (f.ShowDialog(this) != DialogResult.OK || f.Chosen.Count == 0) { RefreshAll(); return; }
+                if (f.Action == "delete") DoPurgeOrphans(f.Chosen);
+                else if (f.Action == "recover") DoRecover(f.Chosen, f.Target);
+            }
+        }
+
+        void DoPurgeOrphans(List<Orphan> chosen)
+        {
+            if (Locked()) return;
+            var sb = new StringBuilder();
+            sb.AppendLine(L.F("永久刪除這 {0} 個沒在清單裡的對話？", chosen.Count));
+            sb.AppendLine();
+            foreach (var o in chosen.Take(10)) sb.AppendLine(L.Bullet + (o.Title ?? L.T("(沒有標題)")) + "　(" + Theme.Bytes(o.Size) + ")");
+            if (chosen.Count > 10) sb.AppendLine(L.Bullet + "…");
+            sb.AppendLine();
+            sb.AppendLine(L.T("會刪掉對話檔、附屬資料夾和 file-history 備份。如果它們是命令列或 VS Code 還要用的對話，那邊也會跟著消失。"));
+            sb.AppendLine(L.T("刪除後無法復原，也不會進資源回收筒。專案資料夾裡的檔案不受影響。"));
+            if (MessageBox.Show(this, sb.ToString(), L.T("永久刪除對話"), MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            try
+            {
+                var r = store.PurgeOrphans(chosen.Select(o => o.Id).ToList());
+                Report(r, "已永久刪除 {0} 個對話", "沒有刪除任何 session", null, null);
+                if (r.Done.Count > 0) status.Text += L.F("，釋放 {0}", Theme.Bytes(r.Bytes));
+                linkUndo.Visible = false;
+            }
+            catch (Exception e) { ShowStatus(L.F("刪除時出錯：{0}", e.Message), Theme.Danger); }
+            RefreshAll();
+        }
+
+        void DoRecover(List<Orphan> chosen, string toKey)
+        {
+            if (Locked()) return;
+            Account dst;
+            try { dst = store.Get(toKey); } catch (Exception e) { ShowStatus(e.Message, Theme.Danger); return; }
+            var ok = MessageBox.Show(this, L.F("把 {0} 個對話加進「{1}」的清單？\n\n這是實驗功能：會用這個帳號最新的一張卡片當範本產生新卡片。重開 Claude 後確認能不能接著聊；不行的話，可以在操作紀錄復原。", chosen.Count, dst.Name),
+                L.T("加進帳號"), MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (ok != DialogResult.Yes) return;
+            try { Report(store.Recover(chosen.Select(o => o.Id).ToList(), toKey), "已加入 {0} 個 session", "沒有加入任何 session", dst, null); }
+            catch (Exception e) { ShowStatus(e.Message, Theme.Danger); }
+            RefreshAll();
+        }
+
+        void RestartClaude()
+        {
+            var processes = ClaudeApp.DesktopProcesses();
+            if (processes.Count == 0) { UpdateRunning(); return; }
+            string exe = ClaudeApp.ExePath(processes);
+            if (MessageBox.Show(this, L.T("重開 Claude 會中斷正在進行的 session（包括正在回答到一半的）。要重開嗎？"), L.T("重開 Claude"),
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            UseWaitCursor = true;
+            Application.DoEvents();
+            try
+            {
+                if (!ClaudeApp.CloseAll(processes, 10000))
+                {
+                    UseWaitCursor = false;
+                    if (MessageBox.Show(this, L.T("Claude 沒有在 10 秒內關閉（可能縮到系統匣了）。要強制結束嗎？"), L.T("重開 Claude"),
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+                    UseWaitCursor = true;
+                    ClaudeApp.KillAll(processes);
+                }
+                if (exe != null) ClaudeApp.Launch(exe);
+                ShowStatus(exe != null ? L.T("已重開 Claude") : L.T("已關閉 Claude，請自己再打開它"), Theme.Ok);
+            }
+            catch (Exception e) { ShowStatus(e.Message, Theme.Danger); }
+            finally { UseWaitCursor = false; }
+            UpdateRunning();
+        }
+
         void OpenSync()
         {
+            if (Locked()) return;
             RefreshAll();
             using (var f = new SyncForm(store, k => colors.ContainsKey(k) ? colors[k] : Theme.Faint, desktopRunning, IsVisible))
             {

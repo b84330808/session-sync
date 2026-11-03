@@ -66,6 +66,8 @@ namespace SessionSync
         public readonly string Id, Dir, Label, Kind;
         public readonly bool Undoable;
         public readonly List<string> Purged = new List<string>();
+        // Set on the batch an undo writes: the batch it reverted, so undoing it again is a redo.
+        public string Reverts, RevertsLabel;
         readonly long createdAt = Fs.NowMs();
         readonly List<Dictionary<string, object>> entries = new List<Dictionary<string, object>>();
         readonly Dictionary<string, Dictionary<string, object>> byPath = new Dictionary<string, Dictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
@@ -130,6 +132,7 @@ namespace SessionSync
             m["createdAt"] = createdAt;
             m["undone"] = false;
             m["undoable"] = Undoable;
+            if (Reverts != null) { m["reverts"] = Reverts; m["revertsLabel"] = RevertsLabel; }
             if (incomplete) m["incomplete"] = true;
             if (Purged.Count > 0) m["purged"] = Purged;
             m["summary"] = new Dictionary<string, object> { { "done", done }, { "skipped", skipped } };
@@ -173,7 +176,15 @@ namespace SessionSync
         // Refuses when a newer, still applied batch touched the same files, because
         // undoing out of order would silently drop that newer change. Files changed
         // since the batch by something else (Claude itself, usually) need force.
-        public static Dictionary<string, object> Undo(string historyDir, string id, bool force)
+        public static Dictionary<string, object> Load(string historyDir, string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || id.Contains(".."))
+                throw new InvalidOperationException(L.T("紀錄編號不正確"));
+            return Json.ParseObject(File.ReadAllText(Path.Combine(historyDir, id, "manifest.json"), Fs.Utf8));
+        }
+
+        // redo: when given, every restore goes through it, so the undo itself can be undone.
+        public static Dictionary<string, object> Undo(string historyDir, string id, bool force, Journal redo = null)
         {
             if (string.IsNullOrEmpty(id) || id.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || id.Contains(".."))
                 throw new InvalidOperationException(L.T("紀錄編號不正確"));
@@ -186,7 +197,8 @@ namespace SessionSync
             var mine = new HashSet<string>(Entries(m).Select(e => (string)e["path"]), StringComparer.OrdinalIgnoreCase);
             long created = Json.Long(m, "createdAt");
             var blocking = List(historyDir)
-                .Where(o => !Json.Bool(o, "undone") && Json.Str(o, "id") != id && Json.Long(o, "createdAt") > created)
+                // A later undo entry doesn't block: it only records that something was reverted.
+                .Where(o => !Json.Bool(o, "undone") && Json.Str(o, "id") != id && Json.Long(o, "createdAt") > created && Json.Str(o, "kind") != "undo")
                 .Where(o => Entries(o).Any(e => mine.Contains((string)e["path"])))
                 .ToList();
             if (blocking.Any(o => o.ContainsKey("undoable") && !Json.Bool(o, "undoable")))
@@ -208,9 +220,25 @@ namespace SessionSync
                 if (Json.Bool(e, "existed"))
                 {
                     string backup = Json.Str(e, "backup");
-                    if (backup != null) Fs.AtomicCopy(Path.Combine(dir, backup.Replace('/', Path.DirectorySeparatorChar)), path);
+                    if (backup == null) continue;
+                    string from = Path.Combine(dir, backup.Replace('/', Path.DirectorySeparatorChar));
+                    if (redo != null) redo.Copy(from, path); else Fs.AtomicCopy(from, path);
                 }
+                else if (redo != null) redo.Remove(path);
                 else if (File.Exists(path)) File.Delete(path);
+            }
+            // Undoing an undo puts the batch it had reverted back in effect.
+            string reverted = Json.Str(m, "reverts");
+            if (reverted != null)
+            {
+                string other = Path.Combine(historyDir, reverted, "manifest.json");
+                if (File.Exists(other))
+                {
+                    var o = Json.ParseObject(File.ReadAllText(other, Fs.Utf8));
+                    o["undone"] = false;
+                    o.Remove("undoneAt");
+                    Fs.AtomicWrite(other, Json.Write(o));
+                }
             }
             m["undone"] = true;
             m["undoneAt"] = Fs.NowMs();

@@ -15,7 +15,7 @@ namespace SessionSync.Tests
         const string C = "33333333-3333-3333-3333-333333333333/cccccccc-cccc-cccc-cccc-cccccccccccc";
         static int pass;
 
-        static string Cli(int n) { return "c1100000-0000-4000-8000-00000000000" + n; }
+        static string Cli(int n) { return string.Format("c1100000-0000-4000-8000-{0:D12}", n); }
         static string Id(int n) { return new string((char)('0' + n), 8) + "-0000-0000-0000-000000000000"; }
         static string Dir(string k) { return Path.Combine(root, k.Replace('/', '\\')); }
         static string CardFile(string k, int n) { return Path.Combine(Dir(k), "local_" + Id(n) + ".json"); }
@@ -441,6 +441,104 @@ namespace SessionSync.Tests
                 Ok(r.Done.Any(d => d.Id == Id(2)), "the other item went through");
                 Ok(r.Skipped.Any(d => d.Id == Id(3) && d.Reason.StartsWith("檔案操作失敗")), "the locked one is a skip: " + string.Join(";", r.Skipped.Select(x => x.Reason)));
                 store.Undo(r.BatchId, true);
+            });
+
+            Test("an unknown file layout makes the store read-only", () =>
+            {
+                string idx = Path.Combine(Dir(C), "archived-sessions.idx");
+                File.WriteAllText(idx, "{\"v\":2,\"archived\":[]}");
+                store.Scan();
+                Ok(store.ReadOnly && store.FormatIssues[0].Contains("2"), "read-only: " + string.Join(";", store.FormatIssues));
+                Throws(() => store.Transfer(A, C, L(Id(2)), false, false), "唯讀模式");
+                Store.TrustFormat = true;
+                try
+                {
+                    var r = store.Transfer(A, C, L(Id(2)), false, false);
+                    Ok(r.Done.Count == 1, "--trust-format lets changes through");
+                    store.Undo(r.BatchId, true);
+                }
+                finally { Store.TrustFormat = false; }
+                File.WriteAllText(idx, "{\"v\":1,\"archived\":[]}");
+                store.Scan();
+                Ok(!store.ReadOnly, "back to normal");
+            });
+
+            Test("undo can be redone, and redo undone again", () =>
+            {
+                var r = store.Transfer(A, C, L(Id(2)), false, false);
+                Ok(Has(C, 2), "copied");
+                var undone = store.Undo(r.BatchId);
+                string redoId = Json.Str(undone, "redoId");
+                Ok(!Has(C, 2) && redoId != null, "undo removes it and offers a redo");
+                var redone = store.Undo(redoId);
+                Ok(Has(C, 2) && Json.Str(redone, "reverts") == r.BatchId, "redo puts it back");
+                Ok(!Json.Bool(Journal.Load(store.HistoryDir, r.BatchId), "undone"), "the original counts as applied again");
+                store.Undo(r.BatchId);
+                Ok(!Has(C, 2), "and can be undone again");
+            });
+
+            Test("conversations no list points at: list, recover, delete", () =>
+            {
+                Func<int, string, string> line = (n, text) => "{\"type\":\"user\",\"cwd\":\"D:\\\\proj\",\"timestamp\":\"2026-10-01T10:0" + n + ":00Z\",\"message\":{\"content\":\"" + text + "\"}}\n";
+                string a = Path.Combine(projects, "p", Cli(20) + ".jsonl");
+                File.WriteAllText(a, line(0, "<command-name>/clear</command-name>") + line(1, "Fix the login bug") + line(2, "and the tests"));
+                string b = Path.Combine(projects, "p", Cli(21) + ".jsonl");
+                File.WriteAllText(b, line(0, "Old notes"));
+                Directory.CreateDirectory(Path.Combine(projects, "p", Cli(21), "subagents"));
+                string busy = Path.Combine(projects, "p", Cli(22) + ".jsonl");
+                File.WriteAllText(busy, line(0, "Still running"));
+                var old = DateTime.UtcNow.AddHours(-2);
+                File.SetLastWriteTimeUtc(a, old);
+                File.SetLastWriteTimeUtc(b, old);
+
+                var list = store.Orphans();
+                var oa = list.FirstOrDefault(o => o.Id == Cli(20));
+                Ok(list.Count == 3 && oa != null, "three orphans found: " + list.Count);
+                Ok(oa.Title == "Fix the login bug" && oa.Cwd == "D:\\proj" && oa.FirstMs > 0, "title skips the command wrapper: " + oa.Title);
+
+                var rec = store.Recover(L(Cli(20)), A);
+                Ok(rec.Done.Count == 1, "recovered into A");
+                var card = Json.ParseObject(File.ReadAllText(CardFile(A, 0).Replace(Id(0), rec.Done[0].Id)));
+                Ok(Json.Str(card, "cliSessionId") == Cli(20) && Json.Str(card, "title") == "Fix the login bug" && Json.Str(card, "cwd") == "D:\\proj", "card points at the transcript");
+                Ok(Json.Str(card, "sessionId") == "local_" + rec.Done[0].Id && !card.ContainsKey("bridgeSessionIds") && Json.Long(card, "completedTurns") == 2, "fresh session fields");
+                store.Scan();
+                Ok(!store.OrphanIds.Contains(Cli(20)), "no longer an orphan");
+                store.Undo(rec.BatchId);
+                store.Scan();
+                Ok(store.OrphanIds.Contains(Cli(20)), "undo removes the new card");
+
+                var del = store.PurgeOrphans(L(Cli(21), Cli(22)));
+                Ok(del.Done.Count == 1 && !File.Exists(b) && !Directory.Exists(Path.Combine(projects, "p", Cli(21))), "deleted with its side folder");
+                Ok(del.Skipped.Count == 1 && File.Exists(busy), "a recently written one is left alone");
+                Throws(() => store.Undo(del.BatchId), "永久刪除無法復原");
+                File.Delete(a);
+                File.Delete(busy);
+            });
+
+            Test("the same account in two Claude data folders stays apart", () =>
+            {
+                string root2 = Path.Combine(tmp, "claude_y", "claude-code-sessions");
+                string d2 = Path.Combine(root2, A.Replace('/', '\\'));
+                Directory.CreateDirectory(d2);
+                File.Copy(CardFile(A, 2), Path.Combine(d2, "local_" + Id(2) + ".json"));
+                var two = new Store(new List<string> { root, root2 }, projects, Path.Combine(tmp, "data2")) { ClaudeJsonPaths = new List<string>() };
+                two.Scan();
+                var same = two.Accounts.Where(x => x.AccountUuid == "11111111-1111-1111-1111-111111111111" && x.OrgUuid.StartsWith("aaaa")).ToList();
+                Ok(same.Count == 2 && same[0].Key != same[1].Key, "two columns with their own keys");
+                two.SetLabel(same[0].Key, "first");
+                two.Scan();
+                Ok(two.Get(same[0].Key).Label == "first" && two.Get(same[1].Key).Label == null, "a label sticks to one folder");
+            });
+
+            Test("Microsoft Store installs restart through their app id", () =>
+            {
+                string pkg = Path.Combine(tmp, "WindowsApps", "Claude_1.2.3.0_x64__abc123");
+                Directory.CreateDirectory(Path.Combine(pkg, "app"));
+                File.WriteAllText(Path.Combine(pkg, "AppxManifest.xml"),
+                    "<Package xmlns=\"http://schemas.microsoft.com/appx/manifest/foundation/windows10\"><Applications>" +
+                    "<Application Id=\"Helper\" Executable=\"app\\helper.exe\"/><Application Id=\"Claude\" Executable=\"app\\Claude.exe\"/></Applications></Package>");
+                Ok(ClaudeApp.AppUserModelId(Path.Combine(pkg, "app", "Claude.exe")) == "Claude_abc123!Claude", "app id from the manifest");
+                Ok(ClaudeApp.AppUserModelId(@"C:\Users\x\AppData\Local\AnthropicClaude\claude.exe") == null, "other installs start by path");
             });
         }
     }

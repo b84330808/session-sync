@@ -25,13 +25,15 @@ namespace SessionSync
             return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
         }
 
-        // Usage: SessionSync.exe [--demo] [--lang zh|en|ja]
+        // Usage: SessionSync.exe [--demo] [--lang zh|en|ja] [--trust-format]
         //   --demo  opens made-up accounts and sessions in a temp folder; your real data is not read.
         [STAThread]
         static int Main(string[] args)
         {
             EnableLongPaths();
             bool demo = args.Any(a => a.Equals("--demo", StringComparison.OrdinalIgnoreCase));
+            // Lets changes through even when Claude's files don't look as expected. At your own risk.
+            Store.TrustFormat = args.Any(a => a.Equals("--trust-format", StringComparison.OrdinalIgnoreCase));
             bool created;
             using (var mutex = new Mutex(true, demo ? @"Local\SessionSync.Demo" : @"Local\SessionSync.SingleInstance", out created))
             {
