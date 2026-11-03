@@ -106,14 +106,41 @@ namespace SessionSync
             FitColumns();
         }
 
-        // The session column takes whatever the fixed and account columns leave.
+        static int AccountWidth(int count) { return Theme.S(count > 4 ? 140 : count > 2 ? 205 : 240); }
+
+        // The session column takes whatever the fixed and account columns leave. In a narrow
+        // window (small or high-DPI screen) the account columns give up width first, so the
+        // last account and the delete column stay on screen. Once the user drags an account
+        // column's edge, its widths are left alone.
         void FitColumns()
         {
             if (Columns.Count == 0 || !IsHandleCreated) return;
-            int others = 0;
-            for (int i = 1; i < Columns.Count; i++) others += Columns[i].Width;
-            int w = ClientSize.Width - others - 1;
-            Columns[0].Width = Math.Max(Theme.S(280), w);
+            fitting = true;
+            try
+            {
+                int n = Columns.Count - FixedColumns - 1;
+                if (n > 0 && !accountsSizedByUser)
+                {
+                    int rest = Columns[Columns.Count - 1].Width;
+                    for (int i = 1; i < FixedColumns; i++) rest += Columns[i].Width;
+                    int room = (ClientSize.Width - 1 - rest - Theme.S(280)) / n;
+                    int each = Math.Max(Theme.S(120), Math.Min(AccountWidth(n), room));
+                    for (int i = 0; i < n; i++) if (Columns[FixedColumns + i].Width != each) Columns[FixedColumns + i].Width = each;
+                }
+                int others = 0;
+                for (int i = 1; i < Columns.Count; i++) others += Columns[i].Width;
+                int w = ClientSize.Width - others - 1;
+                Columns[0].Width = Math.Max(Theme.S(280), w);
+            }
+            finally { fitting = false; }
+        }
+
+        bool fitting, accountsSizedByUser;
+
+        protected override void OnColumnWidthChanged(ColumnWidthChangedEventArgs e)
+        {
+            base.OnColumnWidthChanged(e);
+            if (!fitting && e.ColumnIndex >= FixedColumns && e.ColumnIndex < Columns.Count - 1) accountsSizedByUser = true;
         }
 
         public SessionRow RowAt(int index) { return (SessionRow)Items[index].Tag; }
@@ -141,12 +168,15 @@ namespace SessionSync
                 && Columns.Cast<ColumnHeader>().Skip(FixedColumns).Take(accounts.Count).Select(c => c.Tag as string).SequenceEqual(accounts.Select(a => a.Key));
             if (!sameColumns)
             {
+                fitting = true;
+                accountsSizedByUser = false;
                 Columns.Clear();
                 Columns.Add("Session", Theme.S(420));
                 Columns.Add(L.T("最後活動"), Theme.S(110));
                 Columns.Add(L.T("輪數"), Theme.S(64), HorizontalAlignment.Right);
-                foreach (var a in accounts) Columns.Add(new ColumnHeader { Text = a.Name, Width = Theme.S(accounts.Count > 4 ? 140 : accounts.Count > 2 ? 205 : 240), TextAlign = HorizontalAlignment.Center, Tag = a.Key });
+                foreach (var a in accounts) Columns.Add(new ColumnHeader { Text = a.Name, Width = AccountWidth(accounts.Count), TextAlign = HorizontalAlignment.Center, Tag = a.Key });
                 Columns.Add(new ColumnHeader { Text = "", Width = Theme.S(48) });
+                fitting = false;
             }
             else
             {

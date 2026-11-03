@@ -109,6 +109,14 @@ namespace SessionSync.Tests
             v.EnsureVisible(row);
             Pump(50);
             var b = v.Items[row].SubItems[col].Bounds;
+            // A column past either edge is scrolled into view first, as a user would.
+            int dx = b.Right > v.ClientSize.Width ? b.Right - v.ClientSize.Width : b.X < 0 ? b.X : 0;
+            if (dx != 0)
+            {
+                SendMessage(v.Handle, 0x1014 /* LVM_SCROLL */, (IntPtr)dx, IntPtr.Zero);
+                Pump(50);
+                b = v.Items[row].SubItems[col].Bounds;
+            }
             var e = new MouseEventArgs(MouseButtons.Left, 1, b.X + b.Width / 2, b.Y + b.Height / 2, 0);
             typeof(Control).GetMethod("OnMouseClick", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(v, new object[] { e });
             Pump(400);
@@ -126,10 +134,13 @@ namespace SessionSync.Tests
             return m.Invoke(o, args);
         }
 
-        static MainForm Open(Store store)
+        // The functional run uses a window that fits a 1024×768 screen (the CI runner's),
+        // so columns past the right edge get tested the same way everywhere.
+        static MainForm Open(Store store, bool small = false)
         {
             Theme.Init();
-            var form = new MainForm(store) { StartPosition = FormStartPosition.Manual, Location = new Point(30, 30), Size = new Size(Theme.S(1320), Theme.S(780)) };
+            var size = small ? new Size(Theme.S(980), Theme.S(700)) : new Size(Theme.S(1320), Theme.S(780));
+            var form = new MainForm(store) { StartPosition = FormStartPosition.Manual, Location = new Point(10, 10), Size = size };
             form.Show();
             var start = DateTime.Now;
             while (!Field<bool>(form, "loaded") && (DateTime.Now - start).TotalSeconds < 20) Pump(100);
@@ -191,7 +202,7 @@ namespace SessionSync.Tests
             string outSave = outDir;
             outDir = null; // functional run takes no screenshots
             var store = Demo.Create(DemoDir("func"));
-            var form = Open(store);
+            var form = Open(store, true);
             var v = Field<IndexView>(form, "index");
             var status = Field<Label>(form, "status");
             Func<string, Account> acct = mail => store.Accounts.First(a => a.Email == mail && a.Cards.Count + a.Tombstones.Count > 0);
@@ -200,6 +211,8 @@ namespace SessionSync.Tests
             Check(v.Accounts.Count == 3, "3 accounts shown; the never-used folder is hidden");
             Check(v.Items.Count == 13, "13 sessions listed (archived one hidden): " + v.Items.Count);
             Check(v.Columns.Count == IndexView.FixedColumns + 3 + 1, "account columns + delete column");
+            var trashHead = v.Items[0].SubItems[IndexView.FixedColumns + 3].Bounds;
+            Check(trashHead.Right <= v.ClientSize.Width, "delete column fits a window sized for a 1024×768 screen (right " + trashHead.Right + ", width " + v.ClientSize.Width + ")");
             Check(v.Accounts.Select(a => a.Name).SequenceEqual(new[] { A, B, C }) || v.Accounts.All(a => a.Email != null), "accounts show their e-mail");
 
             // Absent → click adds it.
@@ -358,7 +371,7 @@ namespace SessionSync.Tests
             form.Close();
             Pump(200);
             L.Lang = "en";
-            form = Open(store);
+            form = Open(store, true);
             v = Field<IndexView>(form, "index");
             Check(v.Columns[1].Text == "Last active" && Field<CheckBox>(form, "showArchived").Text == "Show archived", "English labels");
             Check(Field<Label>(form, "status").Text.StartsWith("Found "), "English status: " + Field<Label>(form, "status").Text);

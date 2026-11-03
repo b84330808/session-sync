@@ -15,23 +15,24 @@ if not exist "%CSC%" (
 )
 set REFS=/r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.Xml.dll /r:System.Xml.Linq.dll
 set COMMON=/nologo /utf8output /codepage:65001 /optimize+ /warn:4 %REFS%
+rem Exit codes use "|| exit /b 1": inside ( ) blocks %errorlevel% is read before the block runs.
 
 if /i "%1"=="test" (
   "%CSC%" %COMMON% /target:exe /out:test\StoreTests.exe src\Json.cs src\Journal.cs src\Names.cs src\Store.cs src\L.cs src\ClaudeApp.cs test\StoreTests.cs || exit /b 1
-  test\StoreTests.exe
-  exit /b %errorlevel%
+  test\StoreTests.exe || exit /b 1
+  exit /b 0
 )
 
 if /i "%1"=="uitest" (
   "%CSC%" %COMMON% /target:exe /main:SessionSync.Tests.UiTest /out:test\UiTest.exe /win32manifest:app.manifest src\*.cs test\UiTest.cs || exit /b 1
-  test\UiTest.exe docs\screenshots
-  exit /b %errorlevel%
+  test\UiTest.exe docs\screenshots || exit /b 1
+  exit /b 0
 )
 
 if /i "%1"=="uitest-ci" (
   "%CSC%" %COMMON% /target:exe /main:SessionSync.Tests.UiTest /out:test\UiTest.exe /win32manifest:app.manifest src\*.cs test\UiTest.cs || exit /b 1
-  test\UiTest.exe
-  exit /b %errorlevel%
+  test\UiTest.exe || exit /b 1
+  exit /b 0
 )
 
 "%CSC%" %COMMON% /target:winexe /out:SessionSync.exe /win32manifest:app.manifest /win32icon:app.ico src\*.cs || exit /b 1
